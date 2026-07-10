@@ -69,6 +69,7 @@ var treeCmd = &cobra.Command{
 						branchName,
 						isTrunk,
 						worktreesByBranch,
+						branchDriftStats(ctx, repo, tx, branchName, isTrunk),
 					)
 				}),
 			)
@@ -100,6 +101,47 @@ var stackTreeStackBranchInfoStyles = stackBranchInfoStyles{
 	PullRequestLink: lipgloss.NewStyle(),
 }
 
+// branchDriftStats reports tree-health markers for a branch: a non-trunk
+// parent whose tip the branch is no longer built on (silent fork; PRs may
+// still show mergeable), and branches that carry no commits of their own.
+func branchDriftStats(
+	ctx context.Context,
+	repo *git.Repo,
+	tx meta.ReadTx,
+	branchName string,
+	isTrunk bool,
+) []string {
+	if isTrunk {
+		return nil
+	}
+	bi, ok := tx.Branch(branchName)
+	if !ok || bi.Parent.Name == "" {
+		return nil
+	}
+	parentTip, err := repo.RevParse(ctx, &git.RevParse{Rev: bi.Parent.Name})
+	if err != nil {
+		return nil
+	}
+	var stats []string
+	if !bi.Parent.Trunk {
+		mergeBase, err := repo.MergeBase(ctx, parentTip, branchName)
+		if err == nil && mergeBase != parentTip {
+			stats = append(stats, lipgloss.NewStyle().Bold(true).Foreground(colors.Red600).
+				Render("needs restack: parent moved"))
+		}
+	}
+	if tip, err := repo.RevParse(ctx, &git.RevParse{Rev: branchName}); err == nil {
+		base := bi.Parent.BranchingPointCommitHash
+		if base == "" {
+			base = parentTip
+		}
+		if tip == base || tip == parentTip {
+			stats = append(stats, colors.Faint("no commits"))
+		}
+	}
+	return stats
+}
+
 func renderStackTreeBranchInfo(
 	tx meta.ReadTx,
 	styles stackBranchInfoStyles,
@@ -107,6 +149,7 @@ func renderStackTreeBranchInfo(
 	branchName string,
 	isTrunk bool,
 	worktrees map[string]string,
+	driftStats []string,
 ) string {
 	bi, _ := tx.Branch(branchName)
 
@@ -118,6 +161,7 @@ func renderStackTreeBranchInfo(
 	} else if wtName, ok := worktrees[branchName]; ok {
 		stats = append(stats, colors.Faint("worktree: "+wtName))
 	}
+	stats = append(stats, driftStats...)
 	if bi.ExcludeFromSyncAll {
 		descendants := meta.SubsequentBranches(tx, branchName)
 		if len(descendants) > 0 {
