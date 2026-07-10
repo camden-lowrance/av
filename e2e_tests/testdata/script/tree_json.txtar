@@ -1,0 +1,31 @@
+# av tree --json emits the stack as structured data, including the
+# drift markers (needsRestack, noCommits).
+
+exec av branch foo
+commit-file foo foo
+
+exec av branch bar
+commit-file bar bar
+
+exec av tree --json
+stdout '"name": "main"'
+stdout '"trunk": true'
+stdout '"name": "foo"'
+stdout '"parent": "main"'
+stdout '"name": "bar"'
+stdout '"parent": "foo"'
+stdout '"current": true'
+! stdout '"needsRestack"'
+! stdout '"noCommits"'
+
+# A branch with no commits of its own is marked noCommits.
+exec av branch empty
+exec av tree --json
+stdout '"name": "empty"'
+stdout '"noCommits": true'
+
+# A parent amended out from under its child is marked needsRestack.
+exec git checkout foo
+commit-file --amend foo foo-amended
+exec av tree --json
+stdout '"needsRestack": true'
