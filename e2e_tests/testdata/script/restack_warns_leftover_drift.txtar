@@ -1,0 +1,26 @@
+# A partial restack that leaves a subtree on a rewritten parent's old
+# commits prints a warning naming the branches left behind. The PRs for
+# those branches still show mergeable, so nothing else surfaces this.
+
+exec av branch foo
+commit-file foo foo
+
+exec av branch bar
+commit-file bar bar
+
+exec av branch baz
+commit-file baz baz
+
+# Rewrite foo out from under bar, then restack only bar (--current).
+# baz stays on bar's old tip.
+exec git checkout foo
+commit-file --amend foo foo-amended
+
+exec git checkout bar
+exec av restack --current
+stdout 'Some branches are not restacked on their parent''s latest commit:'
+stdout 'baz \(parent bar has moved\)'
+
+# A full restack picks baz up; no warning remains.
+exec av restack
+! stdout 'Some branches are not restacked'

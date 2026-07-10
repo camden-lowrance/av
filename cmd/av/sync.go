@@ -103,11 +103,15 @@ but can still be synced explicitly.
 			return err
 		}
 
-		return uiutils.RunBubbleTea(&syncViewModel{
+		if err := uiutils.RunBubbleTea(&syncViewModel{
 			repo:   repo,
 			db:     db,
 			client: client,
-		})
+		}); err != nil {
+			return err
+		}
+		warnLeftoverRestackDrift(ctx, repo, db.ReadTx())
+		return nil
 	},
 }
 
