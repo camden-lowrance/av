@@ -42,7 +42,13 @@ var restackCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return uiutils.RunBubbleTea(&restackViewModel{repo: repo, db: db})
+		if err := uiutils.RunBubbleTea(&restackViewModel{repo: repo, db: db}); err != nil {
+			return err
+		}
+		if !restackFlags.DryRun {
+			warnLeftoverRestackDrift(ctx, repo, db.ReadTx())
+		}
+		return nil
 	},
 }
 
