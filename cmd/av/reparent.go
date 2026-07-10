@@ -54,7 +54,11 @@ var reparentCmd = &cobra.Command{
 			reparentFlags.Parent = repo.DefaultBranch()
 		}
 
-		return uiutils.RunBubbleTea(&reparentViewModel{repo: repo, db: db})
+		if err := uiutils.RunBubbleTea(&reparentViewModel{repo: repo, db: db}); err != nil {
+			return err
+		}
+		warnLeftoverRestackDrift(ctx, repo, db.ReadTx())
+		return nil
 	},
 }
 
