@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,7 @@ import (
 )
 
 var flagTreeCurrent bool
+var flagTreeJSON bool
 
 var treeCmd = &cobra.Command{
 	Use:   "tree",
@@ -58,6 +60,18 @@ var treeCmd = &cobra.Command{
 		} else {
 			rootNodes = stackutils.BuildStackTreeAllBranches(tx, currentBranch, true)
 		}
+		if flagTreeJSON {
+			nodes := make([]*treeJSONNode, 0, len(rootNodes))
+			for _, node := range rootNodes {
+				nodes = append(nodes, treeJSONFromNode(ctx, repo, tx, node, currentBranch))
+			}
+			out, err := json.MarshalIndent(nodes, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Println(string(out))
+			return nil
+		}
 		for _, node := range rootNodes {
 			ss = append(
 				ss,
@@ -69,7 +83,7 @@ var treeCmd = &cobra.Command{
 						branchName,
 						isTrunk,
 						worktreesByBranch,
-						branchDriftStats(ctx, repo, tx, branchName, isTrunk),
+						computeBranchDrift(ctx, repo, tx, branchName, isTrunk).stats(),
 					)
 				}),
 			)
@@ -87,6 +101,7 @@ var treeCmd = &cobra.Command{
 
 func init() {
 	treeCmd.Flags().BoolVar(&flagTreeCurrent, "current", false, "show only the current stack")
+	treeCmd.Flags().BoolVar(&flagTreeJSON, "json", false, "output the tree as JSON")
 }
 
 type stackBranchInfoStyles struct {
@@ -101,33 +116,37 @@ var stackTreeStackBranchInfoStyles = stackBranchInfoStyles{
 	PullRequestLink: lipgloss.NewStyle(),
 }
 
-// branchDriftStats reports tree-health markers for a branch: a non-trunk
-// parent whose tip the branch is no longer built on (silent fork; PRs may
-// still show mergeable), and branches that carry no commits of their own.
-func branchDriftStats(
+// branchDrift holds tree-health markers for a branch: a non-trunk parent
+// whose tip the branch is no longer built on (silent fork; PRs may still
+// show mergeable), and branches that carry no commits of their own.
+type branchDrift struct {
+	NeedsRestack bool
+	NoCommits    bool
+}
+
+func computeBranchDrift(
 	ctx context.Context,
 	repo *git.Repo,
 	tx meta.ReadTx,
 	branchName string,
 	isTrunk bool,
-) []string {
+) branchDrift {
+	var drift branchDrift
 	if isTrunk {
-		return nil
+		return drift
 	}
 	bi, ok := tx.Branch(branchName)
 	if !ok || bi.Parent.Name == "" {
-		return nil
+		return drift
 	}
 	parentTip, err := repo.RevParse(ctx, &git.RevParse{Rev: bi.Parent.Name})
 	if err != nil {
-		return nil
+		return drift
 	}
-	var stats []string
 	if !bi.Parent.Trunk {
 		mergeBase, err := repo.MergeBase(ctx, parentTip, branchName)
 		if err == nil && mergeBase != parentTip {
-			stats = append(stats, lipgloss.NewStyle().Bold(true).Foreground(colors.Red600).
-				Render("needs restack: parent moved"))
+			drift.NeedsRestack = true
 		}
 	}
 	if tip, err := repo.RevParse(ctx, &git.RevParse{Rev: branchName}); err == nil {
@@ -136,10 +155,72 @@ func branchDriftStats(
 			base = parentTip
 		}
 		if tip == base || tip == parentTip {
-			stats = append(stats, colors.Faint("no commits"))
+			drift.NoCommits = true
 		}
 	}
+	return drift
+}
+
+func (d branchDrift) stats() []string {
+	var stats []string
+	if d.NeedsRestack {
+		stats = append(stats, lipgloss.NewStyle().Bold(true).Foreground(colors.Red600).
+			Render("needs restack: parent moved"))
+	}
+	if d.NoCommits {
+		stats = append(stats, colors.Faint("no commits"))
+	}
 	return stats
+}
+
+type treeJSONNode struct {
+	Name   string `json:"name"`
+	Trunk  bool   `json:"trunk,omitempty"`
+	Head   string `json:"head,omitempty"`
+	Parent string `json:"parent,omitempty"`
+	// The recorded branching point: the parent commit this branch's own
+	// commits start from. Empty when branching from trunk (av derives it
+	// via merge-base in that case).
+	BranchingPoint string          `json:"branchingPoint,omitempty"`
+	PullRequest    string          `json:"pullRequest,omitempty"`
+	Current        bool            `json:"current,omitempty"`
+	NeedsRestack   bool            `json:"needsRestack,omitempty"`
+	NoCommits      bool            `json:"noCommits,omitempty"`
+	Children       []*treeJSONNode `json:"children,omitempty"`
+}
+
+func treeJSONFromNode(
+	ctx context.Context,
+	repo *git.Repo,
+	tx meta.ReadTx,
+	node *stackutils.StackTreeNode,
+	currentBranch string,
+) *treeJSONNode {
+	branchName := node.Branch.BranchName
+	bi, ok := tx.Branch(branchName)
+	isTrunk := node.Branch.ParentBranchName == ""
+	out := &treeJSONNode{
+		Name:    branchName,
+		Trunk:   isTrunk,
+		Parent:  node.Branch.ParentBranchName,
+		Current: branchName == currentBranch,
+	}
+	if head, err := repo.RevParse(ctx, &git.RevParse{Rev: branchName}); err == nil {
+		out.Head = head
+	}
+	if ok {
+		out.BranchingPoint = bi.Parent.BranchingPointCommitHash
+	}
+	if ok && bi.PullRequest != nil && bi.PullRequest.Permalink != "" {
+		out.PullRequest = bi.PullRequest.Permalink
+	}
+	drift := computeBranchDrift(ctx, repo, tx, branchName, isTrunk)
+	out.NeedsRestack = drift.NeedsRestack
+	out.NoCommits = drift.NoCommits
+	for _, child := range node.Children {
+		out.Children = append(out.Children, treeJSONFromNode(ctx, repo, tx, child, currentBranch))
+	}
+	return out
 }
 
 func renderStackTreeBranchInfo(
